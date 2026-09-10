@@ -40,33 +40,7 @@ func newAuthLoginCmd(deps Deps) *cobra.Command {
 			"Spotify's consent screen and waits for it to redirect back to a local\n" +
 			"server, then stores the resulting access/refresh token for future commands.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), loginTimeout)
-			defer cancel()
-
-			out := cmd.OutOrStdout()
-
-			token, err := deps.Auth.Login(ctx, func(authURL string) {
-				fmt.Fprintln(out, "Opening your browser to log in with Spotify...")
-				fmt.Fprintln(out, "If it doesn't open automatically, visit this URL:")
-				fmt.Fprintln(out, "  "+authURL)
-			})
-			if err != nil {
-				return mapLoginErr(err)
-			}
-
-			fmt.Fprintln(out, "Logged in successfully.")
-			fmt.Fprintf(out, "Granted scopes: %s\n", token.Scope)
-
-			if deps.Profile != nil {
-				if user, err := deps.Profile.Me(ctx); err == nil {
-					printUser(out, user)
-				}
-				// A failure here doesn't invalidate the login itself (the
-				// token is already stored), so it's silently skipped: the
-				// user can still confirm with `auth whoami`.
-			}
-
-			return nil
+			return runAuthLogin(cmd.Context(), deps, cmd.OutOrStdout())
 		},
 	}
 }
@@ -76,26 +50,8 @@ func newAuthWhoamiCmd(deps Deps) *cobra.Command {
 		Use:   "whoami",
 		Short: "Show the Spotify account currently logged in",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			user, err := deps.Profile.Me(cmd.Context())
-			if err != nil {
-				if errors.Is(err, domain.ErrNotAuthenticated) {
-					return errors.New("not logged in: run `spotify-manager auth login`")
-				}
-				return err
-			}
-			printUser(cmd.OutOrStdout(), user)
-			return nil
+			return runAuthWhoami(cmd.Context(), deps, cmd.OutOrStdout())
 		},
-	}
-}
-
-func printUser(out io.Writer, user domain.User) {
-	fmt.Fprintf(out, "Logged in as: %s (id: %s)\n", user.DisplayName, user.ID)
-	if user.Email != "" {
-		fmt.Fprintf(out, "Email: %s\n", user.Email)
-	}
-	if user.Product != "" {
-		fmt.Fprintf(out, "Plan: %s\n", user.Product)
 	}
 }
 
@@ -104,11 +60,7 @@ func newAuthLogoutCmd(deps Deps) *cobra.Command {
 		Use:   "logout",
 		Short: "Forget the stored Spotify session",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := deps.Auth.Logout(cmd.Context()); err != nil {
-				return err
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), "Logged out.")
-			return nil
+			return runAuthLogout(cmd.Context(), deps, cmd.OutOrStdout())
 		},
 	}
 }
@@ -118,22 +70,88 @@ func newAuthStatusCmd(deps Deps) *cobra.Command {
 		Use:   "status",
 		Short: "Show whether you're currently logged in",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			status, err := deps.Auth.Status(cmd.Context())
-			if err != nil {
-				return err
-			}
-
-			out := cmd.OutOrStdout()
-			if !status.Authenticated {
-				fmt.Fprintln(out, "Not logged in. Run `spotify-manager auth login`.")
-				return nil
-			}
-
-			fmt.Fprintln(out, "Logged in.")
-			fmt.Fprintf(out, "Scopes: %s\n", status.Scope)
-			fmt.Fprintf(out, "Access token expires at: %s\n", status.ExpiresAt)
-			return nil
+			return runAuthStatus(cmd.Context(), deps, cmd.OutOrStdout())
 		},
+	}
+}
+
+// runAuthLogin, runAuthWhoami, runAuthLogout and runAuthStatus hold the
+// actual command logic, decoupled from cobra so the interactive menu
+// (internal/adapter/cli/interactive.go) can call the exact same behavior
+// the scriptable subcommands use.
+
+func runAuthLogin(ctx context.Context, deps Deps, out io.Writer) error {
+	ctx, cancel := context.WithTimeout(ctx, loginTimeout)
+	defer cancel()
+
+	token, err := deps.Auth.Login(ctx, func(authURL string) {
+		fmt.Fprintln(out, "Opening your browser to log in with Spotify...")
+		fmt.Fprintln(out, "If it doesn't open automatically, visit this URL:")
+		fmt.Fprintln(out, "  "+authURL)
+	})
+	if err != nil {
+		return mapLoginErr(err)
+	}
+
+	fmt.Fprintln(out, "Logged in successfully.")
+	fmt.Fprintf(out, "Granted scopes: %s\n", token.Scope)
+
+	if deps.Profile != nil {
+		if user, err := deps.Profile.Me(ctx); err == nil {
+			printUser(out, user)
+		}
+		// A failure here doesn't invalidate the login itself (the token is
+		// already stored), so it's silently skipped: the user can still
+		// confirm with `auth whoami`.
+	}
+
+	return nil
+}
+
+func runAuthWhoami(ctx context.Context, deps Deps, out io.Writer) error {
+	user, err := deps.Profile.Me(ctx)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotAuthenticated) {
+			return errors.New("not logged in: run `spotify-manager auth login`")
+		}
+		return err
+	}
+	printUser(out, user)
+	return nil
+}
+
+func runAuthLogout(ctx context.Context, deps Deps, out io.Writer) error {
+	if err := deps.Auth.Logout(ctx); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "Logged out.")
+	return nil
+}
+
+func runAuthStatus(ctx context.Context, deps Deps, out io.Writer) error {
+	status, err := deps.Auth.Status(ctx)
+	if err != nil {
+		return err
+	}
+
+	if !status.Authenticated {
+		fmt.Fprintln(out, "Not logged in. Run `spotify-manager auth login`.")
+		return nil
+	}
+
+	fmt.Fprintln(out, "Logged in.")
+	fmt.Fprintf(out, "Scopes: %s\n", status.Scope)
+	fmt.Fprintf(out, "Access token expires at: %s\n", status.ExpiresAt)
+	return nil
+}
+
+func printUser(out io.Writer, user domain.User) {
+	fmt.Fprintf(out, "Logged in as: %s (id: %s)\n", user.DisplayName, user.ID)
+	if user.Email != "" {
+		fmt.Fprintf(out, "Email: %s\n", user.Email)
+	}
+	if user.Product != "" {
+		fmt.Fprintf(out, "Plan: %s\n", user.Product)
 	}
 }
 

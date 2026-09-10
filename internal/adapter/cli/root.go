@@ -19,13 +19,21 @@ type Deps struct {
 	PlaylistSplit in.PlaylistSplitService
 }
 
-// NewRootCmd builds the top-level "spotify-manager" command tree.
+// NewRootCmd builds the top-level "spotify-manager" command tree. Every
+// action is also reachable as a scriptable subcommand (e.g.
+// `spotify-manager auth login`, for automation and muscle memory); running
+// the binary with no subcommand instead launches an interactive arrow-key
+// menu over the same actions (see interactive.go), so day-to-day use
+// doesn't require remembering flags.
 func NewRootCmd(deps Deps) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "spotify-manager",
 		Short:         "A personal command-line manager for your Spotify account",
 		SilenceUsage:  true,
 		SilenceErrors: false,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runInteractiveMenu(cmd.Context(), deps, cmd.OutOrStdout())
+		},
 	}
 
 	root.AddCommand(newAuthCmd(deps))
