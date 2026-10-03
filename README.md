@@ -31,6 +31,8 @@ Rodar sem nenhum argumento abre um menu navegável com as setas — não precisa
 go run ./cmd
 ```
 
+O menu é organizado em categorias (**Conta**, **Playlists**); o painel mostra seu nome de usuário quando logado, e a opção de entrar/sair da conta se ajusta sozinha de acordo com a sessão atual.
+
 ### Modo direto (scriptável)
 
 Todo comando também existe como subcomando, pra automação ou uso rápido:

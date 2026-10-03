@@ -67,12 +67,52 @@ internal/adapter/cli/     Driving adapter: cobra commands. Owns all terminal I/O
                            `run*(ctx, deps, out) error` function (runAuthLogin, runAuthStatus,
                            runAuthWhoami, runAuthLogout in auth.go; runPlaylistSplitByYear in
                            playlist.go; runPlaylistByArtist/runInteractiveArtistPlaylist in
-                           artist.go) — the cobra RunE closures are thin wrappers around these.
-                           interactive.go's arrow-key menu (shown when the binary runs with no
-                           subcommand, via root's RunE) calls the exact same functions, so the
-                           two interfaces can't drift apart. Add new commands the same way:
-                           write the `run*` func first, wrap it in a cobra command, then add it
-                           to interactive.go's `actions` slice.
+                           artist.go) — the cobra RunE closures are thin wrappers around these,
+                           and the interactive menu (interactive.go) calls the exact same
+                           functions, so the CLI and the menu can't drift apart. Add a new
+                           feature's command the same way: write the `run*` func first, wrap it
+                           in a cobra command, then add a `menuAction{label, run}` entry to the
+                           right category submenu in interactive.go.
+
+                           The interactive menu (shown when the binary runs with no subcommand,
+                           via root's RunE) is two layers: runInteractiveMenu is the top-level
+                           picker over categories ("Conta", "Playlists" — account first, since
+                           it's the natural starting point), each of which opens its own submenu
+                           (runAccountMenu, runPlaylistsMenu) built with the shared
+                           `runActionMenu(ctx, deps, out, title, []menuAction)` helper — except
+                           runAccountMenu, which rebuilds its own item list every loop iteration
+                           instead of using runActionMenu, since it must show exactly one of
+                           "Entrar"/"Sair da conta" depending on current session state (not a
+                           static list). The top-level panel title shows the logged-in account's
+                           display name once known; it's fetched lazily (only right after
+                           Auth.Status()'s Authenticated flag actually flips, not on every
+                           redraw) and cached in runInteractiveMenu's closure — don't add a
+                           network call inside menuModel's Update/View, which must stay
+                           synchronous. There's no "whoami" menu entry on purpose (the panel
+                           title replaces it); `auth whoami` still exists as a cobra subcommand
+                           for scripting.
+
+                           Menu labels are a deliberately standardized style — no emoji
+                           anywhere, every item phrased as an imperative verb ("Entrar", "Criar
+                           playlist por ano", "Voltar"), consistent capitalization. The category
+                           labels are named constants (labelAccount, labelPlaylists, labelExit)
+                           precisely so every place that needs one (the top-level picker, each
+                           submenu's own pickFromList title) stays in sync — reuse them rather
+                           than repeating the string, and follow the same verb-first,
+                           no-emoji convention for any new label you add. All user-facing CLI
+                           text (menu, command output, error messages) is Portuguese — match
+                           that in any new command.
+
+                           interactive.go also exposes `pickFromList(title, items) (idx int, ok
+                           bool, err error)` — the bubbletea arrow-key picker underlying every
+                           menu level, reused by any feature that needs its own picker step (see
+                           artist.go's two-step playlist→artist flow). Its rendering is windowed
+                           to `maxVisibleMenuItems` (12) regardless of list length — a playlist
+                           with hundreds/thousands of distinct artists previously made the raw
+                           unwindowed render overflow and feel broken; don't remove the
+                           windowing when touching menuModel. Don't reintroduce promptui or any
+                           other chzyer/readline-based prompt library either — it beeps on every
+                           arrow key on native Windows consoles.
 
 internal/adapter/spotifyauth/   Driven adapter for accounts.spotify.com (OAuth token exchange/refresh).
 internal/adapter/spotifyweb/    Driven adapter for api.spotify.com (profile, playlists). Both

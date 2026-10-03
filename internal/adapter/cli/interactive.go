@@ -12,12 +12,14 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// menuAction is one entry of the interactive menu. run reuses the exact
-// same functions the scriptable subcommands call (see auth.go, playlist.go)
-// so the two interfaces never drift apart.
+// menuAction is one leaf entry of an action menu (as opposed to a category
+// that opens a submenu). run reuses the exact same functions the
+// scriptable subcommands call (see auth.go, playlist.go) so the two
+// interfaces never drift apart. run == nil means "go back" (a "Voltar"
+// entry, or the top-level "Sair").
 type menuAction struct {
 	label string
-	run   func(ctx context.Context, deps Deps, out io.Writer) error // nil for "exit"
+	run   func(ctx context.Context, deps Deps, out io.Writer) error
 }
 
 var (
@@ -117,13 +119,14 @@ func (m menuModel) View() string {
 		b.WriteString(hintStyle.Render("  ↓ mais abaixo") + "\n")
 	}
 
-	hint := fmt.Sprintf("↑/↓ navega · enter confirma · q sai  (%d/%d)", m.cursor+1, len(m.items))
+	hint := fmt.Sprintf("↑/↓ navega · enter confirma · q volta  (%d/%d)", m.cursor+1, len(m.items))
 	b.WriteString("\n" + hintStyle.Render(hint))
 	return boxStyle.Render(b.String())
 }
 
 // pickFromList runs an arrow-key picker over items and returns the chosen
-// index. ok is false if the user quit (q/Esc/Ctrl+C) instead of picking.
+// index. ok is false if the user backed out (q/Esc/Ctrl+C) instead of
+// picking.
 func pickFromList(title string, items []string) (idx int, ok bool, err error) {
 	program := tea.NewProgram(newMenuModel(title, items))
 	finalModel, err := program.Run()
@@ -138,27 +141,50 @@ func pickFromList(title string, items []string) (idx int, ok bool, err error) {
 	return chosen, true, nil
 }
 
-// runInteractiveMenu is the root command's default behavior: launched when
-// the binary is run with no subcommand, it loops an arrow-key menu until
-// the user picks "Sair" or quits (q / Esc / Ctrl+C).
-func runInteractiveMenu(ctx context.Context, deps Deps, out io.Writer) error {
-	actions := []menuAction{
-		{"Login", runAuthLogin},
-		{"Status da conta", runAuthStatus},
-		{"Quem sou eu (whoami)", runAuthWhoami},
-		{"Logout", runAuthLogout},
-		{"Dividir playlist por ano", runInteractivePlaylistSplit},
-		{"Criar playlist a partir de um artista", runInteractiveArtistPlaylist},
-		{"Sair", nil},
-	}
+// Top-level category labels and every menu item label across this file
+// follow the same style on purpose (part of a "clean, standardized,
+// friendly" pass): no emoji anywhere, every action phrased as an imperative
+// verb ("Entrar", "Criar playlist por ano", "Voltar"), consistent
+// capitalization. Keep new entries consistent with this when extending the
+// menu — don't mix an emoji-prefixed label in among plain ones, or a
+// noun-phrase label in among verb-phrase ones.
+const (
+	labelAccount   = "Conta"
+	labelPlaylists = "Playlists"
+	labelExit      = "Sair"
+)
 
-	items := make([]string, len(actions))
-	for i, a := range actions {
-		items[i] = a.label
-	}
+// runInteractiveMenu is the root command's default behavior: launched when
+// the binary is run with no subcommand. It's a two-layer menu — a top-level
+// picker over categories ("Conta", "Playlists") that each open their own
+// submenu — so day-to-day use doesn't require remembering flags. Account
+// comes first: it's the natural starting point (who am I, am I logged in)
+// before doing anything with playlists. The panel title shows the
+// logged-in account's name once known (fetched lazily, only right after
+// the auth state actually changes, not on every redraw).
+func runInteractiveMenu(ctx context.Context, deps Deps, out io.Writer) error {
+	var authKnown, authed bool
+	var accountName string
 
 	for {
-		chosen, ok, err := pickFromList("spotify-manager", items)
+		status, _ := deps.Auth.Status(ctx)
+		if !authKnown || status.Authenticated != authed {
+			authKnown = true
+			authed = status.Authenticated
+			accountName = ""
+			if authed {
+				if user, err := deps.Profile.Me(ctx); err == nil {
+					accountName = user.DisplayName
+				}
+			}
+		}
+
+		title := "spotify-manager"
+		if accountName != "" {
+			title = fmt.Sprintf("spotify-manager · %s", accountName)
+		}
+
+		idx, ok, err := pickFromList(title, []string{labelAccount, labelPlaylists, labelExit})
 		if err != nil {
 			return err
 		}
@@ -167,9 +193,95 @@ func runInteractiveMenu(ctx context.Context, deps Deps, out io.Writer) error {
 			return nil
 		}
 
-		action := actions[chosen]
-		if action.run == nil {
+		switch idx {
+		case 0:
+			if err := runAccountMenu(ctx, deps, out); err != nil {
+				return err
+			}
+		case 1:
+			if err := runPlaylistsMenu(ctx, deps, out); err != nil {
+				return err
+			}
+		case 2:
 			fmt.Fprintln(out, "Até mais!")
+			return nil
+		}
+	}
+}
+
+// runPlaylistsMenu is the "Playlists" category submenu. Its items don't
+// depend on runtime state, so it's just a static action menu.
+func runPlaylistsMenu(ctx context.Context, deps Deps, out io.Writer) error {
+	return runActionMenu(ctx, deps, out, labelPlaylists, []menuAction{
+		{"Dividir playlist por ano", runInteractivePlaylistSplit},
+		{"Criar playlist por artista", runInteractiveArtistPlaylist},
+		{"Voltar", nil},
+	})
+}
+
+// runAccountMenu is the "Conta" category submenu. Unlike runPlaylistsMenu
+// it rebuilds its item list every loop iteration, since it must show
+// exactly one of "Entrar"/"Sair da conta" depending on current session
+// state — e.g. right after a successful login it must immediately switch
+// to offering to log out, not keep offering to log in.
+func runAccountMenu(ctx context.Context, deps Deps, out io.Writer) error {
+	for {
+		status, _ := deps.Auth.Status(ctx)
+
+		actions := []menuAction{{"Ver status da conta", runAuthStatus}}
+		if status.Authenticated {
+			actions = append(actions, menuAction{"Sair da conta", runAuthLogout})
+		} else {
+			actions = append(actions, menuAction{"Entrar", runAuthLogin})
+		}
+		actions = append(actions, menuAction{"Voltar", nil})
+
+		items := make([]string, len(actions))
+		for i, a := range actions {
+			items[i] = a.label
+		}
+
+		idx, ok, err := pickFromList(labelAccount, items)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+
+		action := actions[idx]
+		if action.run == nil {
+			return nil
+		}
+
+		fmt.Fprintln(out)
+		if err := action.run(ctx, deps, out); err != nil {
+			fmt.Fprintln(out, "Erro:", err)
+		}
+		waitForEnter(out)
+	}
+}
+
+// runActionMenu loops a static leaf-action menu until the user picks
+// "Voltar" (run == nil) or backs out (q/Esc/Ctrl+C) — both return to the
+// caller (the parent menu), not the whole program.
+func runActionMenu(ctx context.Context, deps Deps, out io.Writer, title string, actions []menuAction) error {
+	items := make([]string, len(actions))
+	for i, a := range actions {
+		items[i] = a.label
+	}
+
+	for {
+		idx, ok, err := pickFromList(title, items)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+
+		action := actions[idx]
+		if action.run == nil {
 			return nil
 		}
 
