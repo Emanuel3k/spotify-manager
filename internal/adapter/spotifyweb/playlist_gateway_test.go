@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+
+	"github.com/Emanuel3k/spotify-manager/internal/core/domain"
 )
 
 func newTestPlaylistGateway(srv *httptest.Server) *PlaylistGateway {
@@ -28,9 +30,9 @@ func TestPlaylistGateway_ListTracks_PaginatesAndParsesReleaseYear(t *testing.T) 
 			fmt.Fprintf(w, `{
 				"items": [
 					{"item": {"id":"1","uri":"spotify:track:1","name":"Song A","is_local":false,
-						"artists":[{"name":"Artist A"}],"album":{"release_date":"2020-05-01"}}},
+						"artists":[{"id":"artist-a","name":"Artist A"}],"album":{"release_date":"2020-05-01"}}},
 					{"item": {"id":"2","uri":"spotify:track:2","name":"Song B","is_local":false,
-						"artists":[{"name":"Artist B"}],"album":{"release_date":"1999"}}},
+						"artists":[{"id":"artist-b","name":"Artist B"}],"album":{"release_date":"1999"}}},
 					{"item": null},
 					{"item": {"id":"3","uri":"spotify:local:abc","name":"Local file","is_local":true,
 						"artists":[],"album":{"release_date":""}}}
@@ -43,7 +45,7 @@ func TestPlaylistGateway_ListTracks_PaginatesAndParsesReleaseYear(t *testing.T) 
 		fmt.Fprint(w, `{
 			"items": [
 				{"item": {"id":"4","uri":"spotify:track:4","name":"Song D","is_local":false,
-					"artists":[{"name":"Artist D"}],"album":{"release_date":"2020-12"}}}
+					"artists":[{"id":"artist-d1","name":"Artist D"},{"id":"artist-d2","name":"Feat. Artist"}],"album":{"release_date":"2020-12"}}}
 			],
 			"next": null
 		}`)
@@ -64,18 +66,24 @@ func TestPlaylistGateway_ListTracks_PaginatesAndParsesReleaseYear(t *testing.T) 
 		t.Fatalf("got %d tracks, want 3 (nulls/local files skipped)", len(tracks))
 	}
 
-	byURI := map[string]int{}
+	byURI := map[string]domain.Track{}
 	for _, tr := range tracks {
-		byURI[tr.URI] = tr.ReleaseYear
+		byURI[tr.URI] = tr
 	}
-	if byURI["spotify:track:1"] != 2020 {
-		t.Errorf("track 1 ReleaseYear = %d, want 2020 (from YYYY-MM-DD)", byURI["spotify:track:1"])
+	if byURI["spotify:track:1"].ReleaseYear != 2020 {
+		t.Errorf("track 1 ReleaseYear = %d, want 2020 (from YYYY-MM-DD)", byURI["spotify:track:1"].ReleaseYear)
 	}
-	if byURI["spotify:track:2"] != 1999 {
-		t.Errorf("track 2 ReleaseYear = %d, want 1999 (from YYYY)", byURI["spotify:track:2"])
+	if byURI["spotify:track:2"].ReleaseYear != 1999 {
+		t.Errorf("track 2 ReleaseYear = %d, want 1999 (from YYYY)", byURI["spotify:track:2"].ReleaseYear)
 	}
-	if byURI["spotify:track:4"] != 2020 {
-		t.Errorf("track 4 ReleaseYear = %d, want 2020 (from YYYY-MM)", byURI["spotify:track:4"])
+	if byURI["spotify:track:4"].ReleaseYear != 2020 {
+		t.Errorf("track 4 ReleaseYear = %d, want 2020 (from YYYY-MM)", byURI["spotify:track:4"].ReleaseYear)
+	}
+
+	track4Artists := byURI["spotify:track:4"].Artists
+	wantArtists := []domain.Artist{{ID: "artist-d1", Name: "Artist D"}, {ID: "artist-d2", Name: "Feat. Artist"}}
+	if len(track4Artists) != len(wantArtists) || track4Artists[0] != wantArtists[0] || track4Artists[1] != wantArtists[1] {
+		t.Errorf("track 4 Artists = %+v, want %+v", track4Artists, wantArtists)
 	}
 }
 

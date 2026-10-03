@@ -15,6 +15,7 @@ func newPlaylistCmd(deps Deps) *cobra.Command {
 	}
 
 	cmd.AddCommand(newPlaylistSplitByYearCmd(deps))
+	cmd.AddCommand(newPlaylistByArtistCmd(deps))
 
 	return cmd
 }

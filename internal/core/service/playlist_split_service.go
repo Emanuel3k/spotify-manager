@@ -67,11 +67,7 @@ func (s *PlaylistSplitService) SplitByYear(ctx context.Context, playlistLink str
 		return nil, fmt.Errorf("list source playlist tracks: %w", err)
 	}
 	s.log.Info("split_by_year: fetched source tracks", "count", len(tracks))
-	if len(tracks) == 0 {
-		s.log.Warn("split_by_year: source playlist returned zero tracks; " +
-			"Spotify only returns playlist contents for playlists you own or collaborate on, " +
-			"so this may mean the playlist belongs to someone else")
-	}
+	warnIfNoSourceTracks(s.log, tracks)
 
 	byYear, unknownYear := groupTracksByYear(tracks)
 	if unknownYear > 0 {
@@ -84,94 +80,39 @@ func (s *PlaylistSplitService) SplitByYear(ctx context.Context, playlistLink str
 	}
 	sort.Ints(years)
 
-	existing, err := s.playlists.ListOwnPlaylists(ctx, token.AccessToken, me.ID)
+	byName, err := ownPlaylistsByName(ctx, s.playlists, token.AccessToken, me.ID)
 	if err != nil {
 		s.log.Error("split_by_year: listing existing playlists failed", "error", err)
-		return nil, fmt.Errorf("list your playlists: %w", err)
-	}
-	byName := make(map[string]domain.Playlist, len(existing))
-	for _, p := range existing {
-		if p.OwnerID == me.ID {
-			byName[p.Name] = p
-		}
+		return nil, err
 	}
 
 	results := make([]in.YearSplitResult, 0, len(years))
 	for _, year := range years {
-		result, err := s.upsertYearPlaylist(ctx, token.AccessToken, year, byYear[year], byName)
+		yearTracks := byYear[year]
+		name := strconv.Itoa(year)
+		uris := make([]string, len(yearTracks))
+		for i, t := range yearTracks {
+			uris[i] = t.URI
+		}
+
+		playlist, created, added, skipped, err := upsertPlaylist(ctx, s.playlists, s.log.With("year", year), token.AccessToken, name, byName, uris)
 		if err != nil {
 			return nil, err
 		}
-		results = append(results, result)
+
+		results = append(results, in.YearSplitResult{
+			Year:            year,
+			PlaylistID:      playlist.ID,
+			PlaylistName:    name,
+			PlaylistCreated: created,
+			TracksInYear:    len(yearTracks),
+			TracksAdded:     added,
+			TracksSkipped:   skipped,
+		})
 	}
 
 	s.log.Info("split_by_year: done", "years", len(results))
 	return results, nil
-}
-
-func (s *PlaylistSplitService) upsertYearPlaylist(
-	ctx context.Context,
-	accessToken string,
-	year int,
-	yearTracks []domain.Track,
-	byName map[string]domain.Playlist,
-) (in.YearSplitResult, error) {
-	name := strconv.Itoa(year)
-	log := s.log.With("year", year, "playlist_name", name)
-
-	playlist, alreadyExisted := byName[name]
-	created := false
-	if !alreadyExisted {
-		log.Info("split_by_year: creating year playlist")
-		var err error
-		playlist, err = s.playlists.CreatePlaylist(ctx, accessToken, name, false)
-		if err != nil {
-			log.Error("split_by_year: create playlist failed", "error", err)
-			return in.YearSplitResult{}, fmt.Errorf("create playlist %s: %w", name, err)
-		}
-		created = true
-	} else {
-		log.Info("split_by_year: reusing existing year playlist", "playlist_id", playlist.ID)
-	}
-
-	existingURIs, err := s.playlists.ListTrackURIs(ctx, accessToken, playlist.ID)
-	if err != nil {
-		log.Error("split_by_year: listing year playlist tracks failed", "error", err)
-		return in.YearSplitResult{}, fmt.Errorf("list tracks of playlist %s: %w", name, err)
-	}
-
-	toAdd := make([]string, 0, len(yearTracks))
-	skipped := 0
-	for _, t := range yearTracks {
-		if _, ok := existingURIs[t.URI]; ok {
-			skipped++
-			continue
-		}
-		toAdd = append(toAdd, t.URI)
-		// Mark as seen so a duplicate URI later in the same source
-		// playlist isn't queued twice in this same run (upsert must stay
-		// idempotent within a single call, not just across calls).
-		existingURIs[t.URI] = struct{}{}
-	}
-
-	if len(toAdd) > 0 {
-		if err := s.playlists.AddTracks(ctx, accessToken, playlist.ID, toAdd); err != nil {
-			log.Error("split_by_year: adding tracks failed", "error", err, "count", len(toAdd))
-			return in.YearSplitResult{}, fmt.Errorf("add tracks to playlist %s: %w", name, err)
-		}
-	}
-
-	log.Info("split_by_year: year playlist updated", "created", created, "added", len(toAdd), "already_present", skipped)
-
-	return in.YearSplitResult{
-		Year:            year,
-		PlaylistID:      playlist.ID,
-		PlaylistName:    name,
-		PlaylistCreated: created,
-		TracksInYear:    len(yearTracks),
-		TracksAdded:     len(toAdd),
-		TracksSkipped:   skipped,
-	}, nil
 }
 
 // groupTracksByYear buckets tracks by domain.Track.ReleaseYear, reporting

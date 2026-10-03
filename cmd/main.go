@@ -55,11 +55,13 @@ func run() error {
 
 	playlistGateway := spotifyweb.NewPlaylistGateway(log)
 	playlistSplitService := service.NewPlaylistSplitService(authService, profileService, playlistGateway, log)
+	artistPlaylistService := service.NewArtistPlaylistService(authService, profileService, playlistGateway, log)
 
 	root := cli.NewRootCmd(cli.Deps{
-		Auth:          authService,
-		Profile:       profileService,
-		PlaylistSplit: playlistSplitService,
+		Auth:           authService,
+		Profile:        profileService,
+		PlaylistSplit:  playlistSplitService,
+		ArtistPlaylist: artistPlaylistService,
 	})
 
 	return root.Execute()

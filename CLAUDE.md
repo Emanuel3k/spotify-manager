@@ -17,6 +17,7 @@ go run ./cmd auth status                     # session status
 go run ./cmd auth whoami                     # print current Spotify user
 go run ./cmd auth logout
 go run ./cmd playlist split-by-year "<link>"
+go run ./cmd playlist by-artist "<link>" "<artist name>"
 
 $env:LOG_LEVEL="debug"                       # PowerShell: verbose HTTP-call logging (default is info)
 ```
@@ -34,8 +35,8 @@ internal/core/domain/     Plain value objects + sentinel errors (domain.Token, d
 
 internal/core/port/in/    Driving ports: what the CLI (or any future frontend) can call.
                            One interface per use case (AuthService, ProfileService,
-                           PlaylistSplitService), plus the DTOs they return (in.Status,
-                           in.YearSplitResult).
+                           PlaylistSplitService, ArtistPlaylistService), plus the DTOs they
+                           return (in.Status, in.YearSplitResult, in.ArtistPlaylistResult, ...).
 
 internal/core/port/out/   Driven ports: what core needs from the outside world
                            (SpotifyAuthGateway, ProfileGateway, PlaylistGateway,
@@ -46,18 +47,24 @@ internal/core/service/    Implements the port/in interfaces on top of port/out i
                            services through their port/in interface, not their concrete type
                            (e.g. PlaylistSplitService takes in.AuthService and in.ProfileService,
                            not *service.AuthService) — keeps them independently testable.
+                           playlist_upsert.go holds helpers shared by any service that
+                           find-or-creates a user playlist by name and upserts tracks into it
+                           (ownPlaylistsByName, upsertPlaylist, warnIfNoSourceTracks) — used by
+                           both PlaylistSplitService and ArtistPlaylistService; extend this
+                           rather than re-deriving the same upsert logic in a new service.
 
 internal/adapter/cli/     Driving adapter: cobra commands. Owns all terminal I/O. Deps struct
                            in root.go bundles the port/in services the CLI needs; cmd/main.go
                            constructs it. Every action's real logic lives in a plain
                            `run*(ctx, deps, out) error` function (runAuthLogin, runAuthStatus,
                            runAuthWhoami, runAuthLogout in auth.go; runPlaylistSplitByYear in
-                           playlist.go) — the cobra RunE closures are thin wrappers around
-                           these. interactive.go's arrow-key menu (shown when the binary runs
-                           with no subcommand, via root's RunE) calls the exact same functions,
-                           so the two interfaces can't drift apart. Add new commands the same
-                           way: write the `run*` func first, wrap it in a cobra command, then
-                           add it to interactive.go's `actions` slice.
+                           playlist.go; runPlaylistByArtist/runInteractiveArtistPlaylist in
+                           artist.go) — the cobra RunE closures are thin wrappers around these.
+                           interactive.go's arrow-key menu (shown when the binary runs with no
+                           subcommand, via root's RunE) calls the exact same functions, so the
+                           two interfaces can't drift apart. Add new commands the same way:
+                           write the `run*` func first, wrap it in a cobra command, then add it
+                           to interactive.go's `actions` slice.
 
 internal/adapter/spotifyauth/   Driven adapter for accounts.spotify.com (OAuth token exchange/refresh).
 internal/adapter/spotifyweb/    Driven adapter for api.spotify.com (profile, playlists). Both

@@ -31,15 +31,17 @@ var (
 // menuModel is a minimal bubbletea program: an arrow-key list with a single
 // selection. bubbletea (unlike the readline-based prompt libraries) drives
 // the terminal through proper raw-mode handling on Windows, so arrow keys
-// don't trigger the console error beep.
+// don't trigger the console error beep. It's reused by every arrow-key
+// picker in this package (see pickFromList), not just the top-level menu.
 type menuModel struct {
+	title  string
 	items  []string
 	cursor int
 	chosen int // -1 while running; set on Enter (index) or quit (-2)
 }
 
-func newMenuModel(items []string) menuModel {
-	return menuModel{items: items, chosen: -1}
+func newMenuModel(title string, items []string) menuModel {
+	return menuModel{title: title, items: items, chosen: -1}
 }
 
 func (m menuModel) Init() tea.Cmd { return nil }
@@ -71,7 +73,7 @@ func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m menuModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("spotify-manager") + "\n\n")
+	b.WriteString(titleStyle.Render(m.title) + "\n\n")
 
 	for i, item := range m.items {
 		if i == m.cursor {
@@ -85,6 +87,22 @@ func (m menuModel) View() string {
 	return boxStyle.Render(b.String())
 }
 
+// pickFromList runs an arrow-key picker over items and returns the chosen
+// index. ok is false if the user quit (q/Esc/Ctrl+C) instead of picking.
+func pickFromList(title string, items []string) (idx int, ok bool, err error) {
+	program := tea.NewProgram(newMenuModel(title, items))
+	finalModel, err := program.Run()
+	if err != nil {
+		return 0, false, fmt.Errorf("menu: %w", err)
+	}
+
+	chosen := finalModel.(menuModel).chosen
+	if chosen < 0 {
+		return 0, false, nil
+	}
+	return chosen, true, nil
+}
+
 // runInteractiveMenu is the root command's default behavior: launched when
 // the binary is run with no subcommand, it loops an arrow-key menu until
 // the user picks "Sair" or quits (q / Esc / Ctrl+C).
@@ -95,6 +113,7 @@ func runInteractiveMenu(ctx context.Context, deps Deps, out io.Writer) error {
 		{"Quem sou eu (whoami)", runAuthWhoami},
 		{"Logout", runAuthLogout},
 		{"Dividir playlist por ano", runInteractivePlaylistSplit},
+		{"Criar playlist a partir de um artista", runInteractiveArtistPlaylist},
 		{"Sair", nil},
 	}
 
@@ -104,14 +123,11 @@ func runInteractiveMenu(ctx context.Context, deps Deps, out io.Writer) error {
 	}
 
 	for {
-		program := tea.NewProgram(newMenuModel(items))
-		finalModel, err := program.Run()
+		chosen, ok, err := pickFromList("spotify-manager", items)
 		if err != nil {
-			return fmt.Errorf("menu: %w", err)
+			return err
 		}
-
-		chosen := finalModel.(menuModel).chosen
-		if chosen < 0 {
+		if !ok {
 			fmt.Fprintln(out, "Até mais!")
 			return nil
 		}

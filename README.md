@@ -48,6 +48,9 @@ go run ./cmd auth logout
 
 # Dividir uma playlist em playlists por ano de lançamento (privadas, upsert)
 go run ./cmd playlist split-by-year "https://open.spotify.com/playlist/<id>"
+
+# Criar uma playlist só com as faixas de um artista, a partir de outra playlist
+go run ./cmd playlist by-artist "https://open.spotify.com/playlist/<id>" "Nome do Artista"
 ```
 
 Ou compile um binário: `go build -o spotify-manager.exe ./cmd` e chame `.\spotify-manager.exe` (menu) ou `.\spotify-manager.exe <comando>` (direto).
@@ -75,6 +78,15 @@ Recebe o link de uma playlist, agrupa as faixas pelo ano de lançamento e cria (
 - **Upsert de faixas**: faixas que já estão na playlist do ano não são adicionadas de novo — rodar o comando várias vezes na mesma playlist de origem é seguro (idempotente).
 - Faixas sem ano de lançamento conhecido são ignoradas (fica um aviso no log).
 - A Spotify só retorna o conteúdo de playlists que você é dono ou colabora — um link de playlist de terceiros/editorial roda sem erro, mas com zero faixas.
+
+### Playlist por artista (`playlist by-artist`)
+
+Escolhe um artista presente numa playlist e cria (ou reaproveita) uma playlist privada só com as faixas desse artista, extraídas daquela playlist.
+
+- No modo interativo: escolhe a playlist numa lista das suas, depois escolhe o artista numa lista dos artistas encontrados nela (ordenados por quantidade de faixas).
+- No modo direto: `playlist by-artist <link> "<nome do artista>"` (comparação por nome, sem diferenciar maiúsculas/minúsculas).
+- Mesmo upsert de playlist e de faixas do split-by-year — rodar de novo não duplica nada.
+- A playlist criada leva o nome do artista.
 
 ## Limitações conhecidas da API da Spotify
 

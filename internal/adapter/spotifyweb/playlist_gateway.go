@@ -53,6 +53,7 @@ type playlistItemEntry struct {
 		Name    string `json:"name"`
 		IsLocal bool   `json:"is_local"`
 		Artists []struct {
+			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"artists"`
 		Album struct {
@@ -103,7 +104,7 @@ func (g *PlaylistGateway) fetchPlaylistItems(ctx context.Context, accessToken, p
 
 func (g *PlaylistGateway) ListTracks(ctx context.Context, accessToken, playlistID string) ([]domain.Track, error) {
 	items, err := g.fetchPlaylistItems(ctx, accessToken, playlistID,
-		"items(item(id,uri,name,is_local,artists(name),album(release_date))),next")
+		"items(item(id,uri,name,is_local,artists(id,name),album(release_date))),next")
 	if err != nil {
 		return nil, err
 	}
@@ -113,9 +114,9 @@ func (g *PlaylistGateway) ListTracks(ctx context.Context, accessToken, playlistI
 		if entry.Item == nil || entry.Item.IsLocal || entry.Item.URI == "" {
 			continue
 		}
-		artists := make([]string, 0, len(entry.Item.Artists))
+		artists := make([]domain.Artist, 0, len(entry.Item.Artists))
 		for _, a := range entry.Item.Artists {
-			artists = append(artists, a.Name)
+			artists = append(artists, domain.Artist{ID: a.ID, Name: a.Name})
 		}
 		tracks = append(tracks, domain.Track{
 			URI:         entry.Item.URI,

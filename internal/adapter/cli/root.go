@@ -14,9 +14,10 @@ import (
 // add their own service here (e.g. Playlists in.PlaylistService) without
 // touching how auth is wired.
 type Deps struct {
-	Auth          in.AuthService
-	Profile       in.ProfileService
-	PlaylistSplit in.PlaylistSplitService
+	Auth           in.AuthService
+	Profile        in.ProfileService
+	PlaylistSplit  in.PlaylistSplitService
+	ArtistPlaylist in.ArtistPlaylistService
 }
 
 // NewRootCmd builds the top-level "spotify-manager" command tree. Every
