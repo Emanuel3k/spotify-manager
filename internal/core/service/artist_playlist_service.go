@@ -6,11 +6,21 @@ import (
 	"io"
 	"log/slog"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/Emanuel3k/spotify-manager/internal/core/domain"
 	"github.com/Emanuel3k/spotify-manager/internal/core/port/in"
 	"github.com/Emanuel3k/spotify-manager/internal/core/port/out"
 )
+
+// trackCacheTTL bounds how long a fetched playlist's tracks are reused
+// across the two calls this use case's UI flow always makes back-to-back
+// (ListArtists to show a picker, then CreateFromArtist once the user picks
+// one): without it, a large playlist (seen: 2000+ tracks) was fetched in
+// full twice, roughly doubling an already-slow operation. Short enough that
+// a stale read is very unlikely to matter for a personal tool like this.
+const trackCacheTTL = 2 * time.Minute
 
 // ArtistPlaylistService implements port/in.ArtistPlaylistService: pick an
 // artist out of one of the user's playlists and collect that artist's
@@ -20,6 +30,14 @@ type ArtistPlaylistService struct {
 	profile   in.ProfileService
 	playlists out.PlaylistGateway
 	log       *slog.Logger
+
+	cacheMu sync.Mutex
+	cache   map[string]cachedTracks // playlistID -> last fetch
+}
+
+type cachedTracks struct {
+	tracks    []domain.Track
+	fetchedAt time.Time
 }
 
 var _ in.ArtistPlaylistService = (*ArtistPlaylistService)(nil)
@@ -36,7 +54,31 @@ func NewArtistPlaylistService(auth in.AuthService, profile in.ProfileService, pl
 		profile:   profile,
 		playlists: playlists,
 		log:       logger.With("component", "artist_playlist_service"),
+		cache:     make(map[string]cachedTracks),
 	}
+}
+
+// tracksFor returns playlistID's tracks, reusing a recent fetch (within
+// trackCacheTTL) instead of re-fetching the whole playlist.
+func (s *ArtistPlaylistService) tracksFor(ctx context.Context, accessToken, playlistID string) ([]domain.Track, error) {
+	s.cacheMu.Lock()
+	cached, ok := s.cache[playlistID]
+	s.cacheMu.Unlock()
+	if ok && time.Since(cached.fetchedAt) < trackCacheTTL {
+		s.log.Debug("tracks_for: cache hit, skipping a redundant fetch", "playlist_id", playlistID, "count", len(cached.tracks))
+		return cached.tracks, nil
+	}
+
+	tracks, err := s.playlists.ListTracks(ctx, accessToken, playlistID)
+	if err != nil {
+		return nil, err
+	}
+
+	s.cacheMu.Lock()
+	s.cache[playlistID] = cachedTracks{tracks: tracks, fetchedAt: time.Now()}
+	s.cacheMu.Unlock()
+
+	return tracks, nil
 }
 
 func (s *ArtistPlaylistService) ListOwnPlaylists(ctx context.Context) ([]in.PlaylistRef, error) {
@@ -83,7 +125,7 @@ func (s *ArtistPlaylistService) ListArtists(ctx context.Context, playlistRef str
 		return nil, err
 	}
 
-	tracks, err := s.playlists.ListTracks(ctx, token.AccessToken, playlistID)
+	tracks, err := s.tracksFor(ctx, token.AccessToken, playlistID)
 	if err != nil {
 		s.log.Error("list_artists: listing source playlist tracks failed", "error", err)
 		return nil, fmt.Errorf("list source playlist tracks: %w", err)
@@ -116,7 +158,7 @@ func (s *ArtistPlaylistService) CreateFromArtist(ctx context.Context, playlistRe
 		return in.ArtistPlaylistResult{}, fmt.Errorf("resolve current user: %w", err)
 	}
 
-	tracks, err := s.playlists.ListTracks(ctx, token.AccessToken, playlistID)
+	tracks, err := s.tracksFor(ctx, token.AccessToken, playlistID)
 	if err != nil {
 		log.Error("create_from_artist: listing source playlist tracks failed", "error", err)
 		return in.ArtistPlaylistResult{}, fmt.Errorf("list source playlist tracks: %w", err)

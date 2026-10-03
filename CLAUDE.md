@@ -52,6 +52,14 @@ internal/core/service/    Implements the port/in interfaces on top of port/out i
                            (ownPlaylistsByName, upsertPlaylist, warnIfNoSourceTracks) — used by
                            both PlaylistSplitService and ArtistPlaylistService; extend this
                            rather than re-deriving the same upsert logic in a new service.
+                           ArtistPlaylistService caches a playlist's fetched tracks for
+                           trackCacheTTL (2 min) because its UI flow always calls ListArtists
+                           then CreateFromArtist back-to-back against the same playlist — found
+                           via a real 2000+ track playlist where fetching it twice roughly
+                           doubled an already-slow operation. If a new method on this service
+                           also needs a playlist's tracks, fetch them through `s.tracksFor(...)`,
+                           not `s.playlists.ListTracks(...)` directly, or you'll reintroduce the
+                           double-fetch.
 
 internal/adapter/cli/     Driving adapter: cobra commands. Owns all terminal I/O. Deps struct
                            in root.go bundles the port/in services the CLI needs; cmd/main.go
@@ -70,6 +78,13 @@ internal/adapter/spotifyauth/   Driven adapter for accounts.spotify.com (OAuth t
 internal/adapter/spotifyweb/    Driven adapter for api.spotify.com (profile, playlists). Both
                                  gateways embed a shared `client` (client.go) that centralizes
                                  auth headers, JSON error parsing and request logging.
+                                 fetchPlaylistItems (playlist_gateway.go) fetches page 0 to learn
+                                 the item `total`, then fetches every remaining page concurrently
+                                 (bounded by maxConcurrentPageFetches = 6) instead of following
+                                 the API's "next" link one page at a time — found via a real
+                                 2093-track playlist where sequential pagination felt like a
+                                 hang. Keep this concurrent-by-offset approach if you touch
+                                 pagination here; don't revert to sequential "next"-following.
 internal/adapter/tokenstore/    TokenRepository as a JSON file under the OS user config dir.
 internal/adapter/browser/       BrowserOpener via OS-native "open URL" shell-out.
 internal/adapter/callback/      CallbackListener: short-lived local HTTP server that captures

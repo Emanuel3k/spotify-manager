@@ -28,16 +28,25 @@ var (
 	hintStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 )
 
+// maxVisibleMenuItems caps how many items menuModel draws at once. Without
+// this, a list built from real data (e.g. the hundreds of distinct artists
+// in a large playlist) rendered every item on every keypress — overflowing
+// the terminal and making the menu feel broken/laggy. A fixed-size
+// scrolling window keeps rendering cost constant regardless of list size.
+const maxVisibleMenuItems = 12
+
 // menuModel is a minimal bubbletea program: an arrow-key list with a single
-// selection. bubbletea (unlike the readline-based prompt libraries) drives
-// the terminal through proper raw-mode handling on Windows, so arrow keys
-// don't trigger the console error beep. It's reused by every arrow-key
-// picker in this package (see pickFromList), not just the top-level menu.
+// selection, windowed to maxVisibleMenuItems. bubbletea (unlike the
+// readline-based prompt libraries) drives the terminal through proper
+// raw-mode handling on Windows, so arrow keys don't trigger the console
+// error beep. It's reused by every arrow-key picker in this package (see
+// pickFromList), not just the top-level menu.
 type menuModel struct {
-	title  string
-	items  []string
-	cursor int
-	chosen int // -1 while running; set on Enter (index) or quit (-2)
+	title       string
+	items       []string
+	cursor      int
+	windowStart int
+	chosen      int // -1 while running; set on Enter (index) or quit (-2)
 }
 
 func newMenuModel(title string, items []string) menuModel {
@@ -64,9 +73,27 @@ func (m menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cursor < len(m.items)-1 {
 			m.cursor++
 		}
+	case "pgup":
+		m.cursor -= maxVisibleMenuItems
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+	case "pgdown":
+		m.cursor += maxVisibleMenuItems
+		if m.cursor > len(m.items)-1 {
+			m.cursor = len(m.items) - 1
+		}
 	case "enter":
 		m.chosen = m.cursor
 		return m, tea.Quit
+	}
+
+	// Keep the cursor inside the visible window, scrolling it as needed.
+	if m.cursor < m.windowStart {
+		m.windowStart = m.cursor
+	}
+	if m.cursor >= m.windowStart+maxVisibleMenuItems {
+		m.windowStart = m.cursor - maxVisibleMenuItems + 1
 	}
 	return m, nil
 }
@@ -75,15 +102,23 @@ func (m menuModel) View() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render(m.title) + "\n\n")
 
-	for i, item := range m.items {
+	end := min(m.windowStart+maxVisibleMenuItems, len(m.items))
+	if m.windowStart > 0 {
+		b.WriteString(hintStyle.Render("  ↑ mais acima") + "\n")
+	}
+	for i := m.windowStart; i < end; i++ {
 		if i == m.cursor {
-			b.WriteString(cursorStyle.Render("❱ ") + selectedStyle.Render(item) + "\n")
+			b.WriteString(cursorStyle.Render("❱ ") + selectedStyle.Render(m.items[i]) + "\n")
 		} else {
-			b.WriteString("  " + item + "\n")
+			b.WriteString("  " + m.items[i] + "\n")
 		}
 	}
+	if end < len(m.items) {
+		b.WriteString(hintStyle.Render("  ↓ mais abaixo") + "\n")
+	}
 
-	b.WriteString("\n" + hintStyle.Render("↑/↓ navega · enter confirma · q sai"))
+	hint := fmt.Sprintf("↑/↓ navega · enter confirma · q sai  (%d/%d)", m.cursor+1, len(m.items))
+	b.WriteString("\n" + hintStyle.Render(hint))
 	return boxStyle.Render(b.String())
 }
 

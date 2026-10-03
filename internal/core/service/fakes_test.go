@@ -148,8 +148,9 @@ func (f *fakeProfileService) Me(context.Context) (domain.User, error) {
 // -- out.PlaylistGateway --------------------------------------------------------
 
 type fakePlaylistGateway struct {
-	tracks        []domain.Track
-	listTracksErr error
+	tracks          []domain.Track
+	listTracksErr   error
+	listTracksCalls int
 
 	trackURIs        map[string]map[string]struct{} // playlistID -> uris
 	listTrackURIsErr error
@@ -173,6 +174,7 @@ func newFakePlaylistGateway() *fakePlaylistGateway {
 }
 
 func (f *fakePlaylistGateway) ListTracks(_ context.Context, _, _ string) ([]domain.Track, error) {
+	f.listTracksCalls++
 	return f.tracks, f.listTracksErr
 }
 

@@ -155,3 +155,31 @@ func TestArtistPlaylistService_PropagatesAuthError(t *testing.T) {
 		t.Errorf("CreateFromArtist() error = %v, want %v", err, wantErr)
 	}
 }
+
+// TestArtistPlaylistService_CachesSourceTracksAcrossListAndCreate guards
+// against a real performance regression: ListArtists and CreateFromArtist
+// are always called back-to-back by the CLI's picker flow against the same
+// source playlist, and originally each independently fetched the whole
+// playlist — for a playlist with thousands of tracks that doubled an
+// already slow operation. The gateway must only be asked once.
+func TestArtistPlaylistService_CachesSourceTracksAcrossListAndCreate(t *testing.T) {
+	auth := &fakeAuthService{validToken: domain.Token{AccessToken: "at"}}
+	profile := &fakeProfileService{user: domain.User{ID: "me"}}
+	gw := newFakePlaylistGateway()
+	gw.tracks = []domain.Track{
+		{URI: "spotify:track:1", Artists: []domain.Artist{{ID: "a-queen", Name: "Queen"}}},
+	}
+
+	svc := newTestArtistPlaylistService(auth, profile, gw)
+
+	if _, err := svc.ListArtists(context.Background(), validPlaylistLink); err != nil {
+		t.Fatalf("ListArtists() error = %v, want nil", err)
+	}
+	if _, err := svc.CreateFromArtist(context.Background(), validPlaylistLink, "a-queen", "Queen"); err != nil {
+		t.Fatalf("CreateFromArtist() error = %v, want nil", err)
+	}
+
+	if gw.listTracksCalls != 1 {
+		t.Errorf("ListTracks called %d times, want 1 (CreateFromArtist should reuse ListArtists' fetch)", gw.listTracksCalls)
+	}
+}

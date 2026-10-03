@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 
 	"github.com/Emanuel3k/spotify-manager/internal/core/domain"
 	"github.com/Emanuel3k/spotify-manager/internal/core/port/out"
@@ -17,6 +18,17 @@ import (
 // maxTracksPerAddRequest is the Web API's hard limit on how many track URIs
 // a single POST /playlists/{id}/items call may carry.
 const maxTracksPerAddRequest = 100
+
+// playlistItemsPageSize is how many items each GET /playlists/{id}/items
+// request fetches at once (the Web API's own max for this endpoint).
+const playlistItemsPageSize = 100
+
+// maxConcurrentPageFetches bounds how many playlist-item pages are fetched
+// in parallel once the total is known. Large playlists (seen: 2000+ tracks,
+// 20+ pages) were previously fetched one page at a time, which made this
+// feature feel like it hung; a handful of concurrent requests is a large
+// speedup without hammering Spotify's rate limits.
+const maxConcurrentPageFetches = 6
 
 // PlaylistGateway implements out.PlaylistGateway via the Web API's
 // /v1/playlists, /v1/me/playlists and /v1/me/playlists (create) endpoints.
@@ -64,47 +76,92 @@ type playlistItemEntry struct {
 
 type playlistItemsPage struct {
 	Items []playlistItemEntry `json:"items"`
-	Next  *string             `json:"next"`
+	Total *int                `json:"total"`
 }
 
-// fetchPlaylistItems pages through GET /v1/playlists/{id}/items, following
-// the API's absolute "next" URL until it is null. fields restricts the
-// response to just what the caller needs (ListTracks wants names/artists/
-// release dates, ListTrackURIs only needs the URI). Spotify only returns
-// item data here for playlists the current user owns or collaborates on;
-// for any other playlist the result is an empty (but successful) page.
+// fetchPlaylistItems pages through GET /v1/playlists/{id}/items. The first
+// page tells us the total item count, so every remaining page's offset is
+// known up front and fetched concurrently (bounded by
+// maxConcurrentPageFetches) instead of waiting on each page's "next" link
+// one at a time — large playlists (thousands of tracks, 20+ pages) used to
+// make this feel like a hang. fields restricts the response to just what
+// the caller needs (ListTracks wants names/artists/release dates,
+// ListTrackURIs only needs the URI). Spotify only returns item data here
+// for playlists the current user owns or collaborates on; for any other
+// playlist the result is an empty (but successful) page.
 func (g *PlaylistGateway) fetchPlaylistItems(ctx context.Context, accessToken, playlistID, fields string) ([]playlistItemEntry, error) {
-	values := url.Values{}
-	values.Set("limit", "100")
-	values.Set("fields", fields)
-	path := fmt.Sprintf("/v1/playlists/%s/items?%s", url.PathEscape(playlistID), values.Encode())
+	basePath := fmt.Sprintf("/v1/playlists/%s/items", url.PathEscape(playlistID))
+	requestFields := "total," + fields
 
-	var all []playlistItemEntry
-	for path != "" {
+	fetchPage := func(offset int) (playlistItemsPage, error) {
+		values := url.Values{}
+		values.Set("limit", strconv.Itoa(playlistItemsPageSize))
+		values.Set("offset", strconv.Itoa(offset))
+		values.Set("fields", requestFields)
+
 		var page playlistItemsPage
-		if err := g.do(ctx, "list_playlist_items", http.MethodGet, path, accessToken, nil, &page); err != nil {
-			return nil, err
-		}
-		all = append(all, page.Items...)
+		err := g.do(ctx, "list_playlist_items", http.MethodGet, basePath+"?"+values.Encode(), accessToken, nil, &page)
+		return page, err
+	}
 
-		if page.Next == nil || *page.Next == "" {
-			break
+	first, err := fetchPage(0)
+	if err != nil {
+		return nil, err
+	}
+
+	total := len(first.Items)
+	if first.Total != nil {
+		total = *first.Total
+	}
+	numPages := 1
+	if total > playlistItemsPageSize {
+		numPages = (total + playlistItemsPageSize - 1) / playlistItemsPageSize
+	}
+
+	pages := make([][]playlistItemEntry, numPages)
+	pages[0] = first.Items
+
+	if numPages > 1 {
+		g.log.Debug("list_playlist_items: fetching remaining pages concurrently",
+			"playlist_id", playlistID, "total", total, "pages", numPages, "concurrency", maxConcurrentPageFetches)
+
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, maxConcurrentPageFetches)
+		errCh := make(chan error, numPages-1)
+
+		for p := 1; p < numPages; p++ {
+			wg.Add(1)
+			go func(p int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				page, err := fetchPage(p * playlistItemsPageSize)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				pages[p] = page.Items
+			}(p)
 		}
-		next, err := url.Parse(*page.Next)
-		if err != nil {
-			return nil, fmt.Errorf("parse next page url: %w", err)
+
+		wg.Wait()
+		close(errCh)
+		if pageErr, ok := <-errCh; ok {
+			return nil, pageErr
 		}
-		path = next.Path
-		if next.RawQuery != "" {
-			path += "?" + next.RawQuery
-		}
+	}
+
+	all := make([]playlistItemEntry, 0, total)
+	for _, p := range pages {
+		all = append(all, p...)
 	}
 	return all, nil
 }
 
 func (g *PlaylistGateway) ListTracks(ctx context.Context, accessToken, playlistID string) ([]domain.Track, error) {
 	items, err := g.fetchPlaylistItems(ctx, accessToken, playlistID,
-		"items(item(id,uri,name,is_local,artists(id,name),album(release_date))),next")
+		"items(item(id,uri,name,is_local,artists(id,name),album(release_date)))")
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +187,7 @@ func (g *PlaylistGateway) ListTracks(ctx context.Context, accessToken, playlistI
 }
 
 func (g *PlaylistGateway) ListTrackURIs(ctx context.Context, accessToken, playlistID string) (map[string]struct{}, error) {
-	items, err := g.fetchPlaylistItems(ctx, accessToken, playlistID, "items(item(uri,is_local)),next")
+	items, err := g.fetchPlaylistItems(ctx, accessToken, playlistID, "items(item(uri,is_local))")
 	if err != nil {
 		return nil, err
 	}

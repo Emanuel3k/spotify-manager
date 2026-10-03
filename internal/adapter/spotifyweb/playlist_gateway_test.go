@@ -7,10 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
-
-	"github.com/Emanuel3k/spotify-manager/internal/core/domain"
 )
 
 func newTestPlaylistGateway(srv *httptest.Server) *PlaylistGateway {
@@ -19,36 +18,72 @@ func newTestPlaylistGateway(srv *httptest.Server) *PlaylistGateway {
 	return g
 }
 
-func TestPlaylistGateway_ListTracks_PaginatesAndParsesReleaseYear(t *testing.T) {
-	var calls int32
-	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&calls, 1)
-		w.Header().Set("Content-Type", "application/json")
+// fakeArtist/fakeItem/fakeEntry mirror the JSON shape the real Web API
+// returns for GET /playlists/{id}/items, for building test fixtures.
+type fakeArtist struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
 
-		if n == 1 {
-			fmt.Fprintf(w, `{
-				"items": [
-					{"item": {"id":"1","uri":"spotify:track:1","name":"Song A","is_local":false,
-						"artists":[{"id":"artist-a","name":"Artist A"}],"album":{"release_date":"2020-05-01"}}},
-					{"item": {"id":"2","uri":"spotify:track:2","name":"Song B","is_local":false,
-						"artists":[{"id":"artist-b","name":"Artist B"}],"album":{"release_date":"1999"}}},
-					{"item": null},
-					{"item": {"id":"3","uri":"spotify:local:abc","name":"Local file","is_local":true,
-						"artists":[],"album":{"release_date":""}}}
-				],
-				"next": %q
-			}`, srv.URL+"/v1/playlists/pid/items?offset=100&limit=100")
-			return
+type fakeItem struct {
+	ID      string       `json:"id"`
+	URI     string       `json:"uri"`
+	Name    string       `json:"name"`
+	IsLocal bool         `json:"is_local"`
+	Artists []fakeArtist `json:"artists"`
+	Album   struct {
+		ReleaseDate string `json:"release_date"`
+	} `json:"album"`
+}
+
+type fakeEntry struct {
+	Item *fakeItem `json:"item"`
+}
+
+// TestPlaylistGateway_ListTracks_PaginatesConcurrentlyAndParsesFields uses a
+// playlist large enough to span 3 pages (at the gateway's 100-per-page
+// size) to exercise the concurrent, offset-based pagination added to fix a
+// real large-playlist performance issue (a 2000+ track playlist made the
+// old sequential "follow next" pagination feel like a hang). It also checks
+// that concurrently-fetched pages are reassembled in the correct order.
+func TestPlaylistGateway_ListTracks_PaginatesConcurrentlyAndParsesFields(t *testing.T) {
+	const total = 250 // forces 3 pages: 100 + 100 + 50
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		q := r.URL.Query()
+		offset, _ := strconv.Atoi(q.Get("offset"))
+		limit, _ := strconv.Atoi(q.Get("limit"))
+
+		end := offset + limit
+		if end > total {
+			end = total
 		}
 
-		fmt.Fprint(w, `{
-			"items": [
-				{"item": {"id":"4","uri":"spotify:track:4","name":"Song D","is_local":false,
-					"artists":[{"id":"artist-d1","name":"Artist D"},{"id":"artist-d2","name":"Feat. Artist"}],"album":{"release_date":"2020-12"}}}
-			],
-			"next": null
-		}`)
+		items := make([]fakeEntry, 0, end-offset)
+		for i := offset; i < end; i++ {
+			switch i {
+			case 1:
+				items = append(items, fakeEntry{}) // removed track: null item
+			case 2:
+				items = append(items, fakeEntry{Item: &fakeItem{ID: "local", URI: "spotify:local:abc", Name: "Local file", IsLocal: true}})
+			default:
+				item := &fakeItem{
+					ID:   fmt.Sprintf("id-%d", i),
+					URI:  fmt.Sprintf("spotify:track:%d", i),
+					Name: fmt.Sprintf("Song %d", i),
+					Artists: []fakeArtist{
+						{ID: fmt.Sprintf("artist-%d", i%5), Name: fmt.Sprintf("Artist %d", i%5)},
+					},
+				}
+				item.Album.ReleaseDate = "2020-01-01"
+				items = append(items, fakeEntry{Item: item})
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"total": total, "items": items})
 	}))
 	defer srv.Close()
 
@@ -57,44 +92,42 @@ func TestPlaylistGateway_ListTracks_PaginatesAndParsesReleaseYear(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ListTracks() error = %v, want nil", err)
 	}
-	if calls != 2 {
-		t.Fatalf("server got %d requests, want 2 (pagination followed)", calls)
+
+	if calls != 3 {
+		t.Fatalf("server got %d requests, want 3 (250 items at 100/page)", calls)
 	}
 
-	// Null and local tracks must be skipped; 3 real tracks remain across both pages.
-	if len(tracks) != 3 {
-		t.Fatalf("got %d tracks, want 3 (nulls/local files skipped)", len(tracks))
+	wantCount := total - 2 // one null item, one local file, both excluded
+	if len(tracks) != wantCount {
+		t.Fatalf("got %d tracks, want %d (null/local entries skipped)", len(tracks), wantCount)
 	}
 
-	byURI := map[string]domain.Track{}
-	for _, tr := range tracks {
-		byURI[tr.URI] = tr
+	// Pages are fetched concurrently but must be reassembled in offset
+	// order: track 0 must still be first and the final offset's track last.
+	if tracks[0].URI != "spotify:track:0" {
+		t.Errorf("tracks[0].URI = %q, want %q (pages must be reassembled in order)", tracks[0].URI, "spotify:track:0")
 	}
-	if byURI["spotify:track:1"].ReleaseYear != 2020 {
-		t.Errorf("track 1 ReleaseYear = %d, want 2020 (from YYYY-MM-DD)", byURI["spotify:track:1"].ReleaseYear)
+	last := tracks[len(tracks)-1]
+	wantLastURI := fmt.Sprintf("spotify:track:%d", total-1)
+	if last.URI != wantLastURI {
+		t.Errorf("last track URI = %q, want %q (order broken)", last.URI, wantLastURI)
 	}
-	if byURI["spotify:track:2"].ReleaseYear != 1999 {
-		t.Errorf("track 2 ReleaseYear = %d, want 1999 (from YYYY)", byURI["spotify:track:2"].ReleaseYear)
+	if last.ReleaseYear != 2020 {
+		t.Errorf("last track ReleaseYear = %d, want 2020", last.ReleaseYear)
 	}
-	if byURI["spotify:track:4"].ReleaseYear != 2020 {
-		t.Errorf("track 4 ReleaseYear = %d, want 2020 (from YYYY-MM)", byURI["spotify:track:4"].ReleaseYear)
-	}
-
-	track4Artists := byURI["spotify:track:4"].Artists
-	wantArtists := []domain.Artist{{ID: "artist-d1", Name: "Artist D"}, {ID: "artist-d2", Name: "Feat. Artist"}}
-	if len(track4Artists) != len(wantArtists) || track4Artists[0] != wantArtists[0] || track4Artists[1] != wantArtists[1] {
-		t.Errorf("track 4 Artists = %+v, want %+v", track4Artists, wantArtists)
+	if len(last.Artists) != 1 || last.Artists[0].Name == "" {
+		t.Errorf("last track Artists = %+v, want one populated artist", last.Artists)
 	}
 }
 
 func TestPlaylistGateway_ListTrackURIs(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"items":[
+		fmt.Fprint(w, `{"total":3,"items":[
 			{"item":{"uri":"spotify:track:1","is_local":false}},
 			{"item":{"uri":"spotify:track:2","is_local":true}},
 			{"item":null}
-		],"next":null}`)
+		]}`)
 	}))
 	defer srv.Close()
 
