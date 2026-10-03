@@ -103,6 +103,17 @@ internal/adapter/cli/     Driving adapter: cobra commands. Owns all terminal I/O
                            text (menu, command output, error messages) is Portuguese — match
                            that in any new command.
 
+                           auth.go's renderAccountPanel/renderInfoPanel (both reuse
+                           boxStyle/titleStyle/hintStyle from interactive.go) are the
+                           standardized way to show "info about the account/a result" in a box
+                           matching the menu's own visual language, instead of bare
+                           fmt.Fprintln lines — used by login, whoami and status today. Reuse
+                           these (or follow the same pattern: a titled box, hintStyle-colored
+                           field labels left-padded to a common width) for any new feature that
+                           displays a few labeled facts, rather than inventing a new plain-text
+                           format. lipgloss auto-disables color/box-drawing when stdout isn't a
+                           terminal, so this doesn't break piping scriptable output.
+
                            interactive.go also exposes `pickFromList(title, items) (idx int, ok
                            bool, err error)` — the bubbletea arrow-key picker underlying every
                            menu level, reused by any feature that needs its own picker step (see

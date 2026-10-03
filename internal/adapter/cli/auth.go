@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -85,26 +86,25 @@ func runAuthLogin(ctx context.Context, deps Deps, out io.Writer) error {
 	defer cancel()
 
 	token, err := deps.Auth.Login(ctx, func(authURL string) {
-		fmt.Fprintln(out, "Opening your browser to log in with Spotify...")
-		fmt.Fprintln(out, "If it doesn't open automatically, visit this URL:")
+		fmt.Fprintln(out, "Abrindo o navegador para autorizar o acesso à sua conta Spotify...")
+		fmt.Fprintln(out, "Se não abrir sozinho, acesse este link:")
 		fmt.Fprintln(out, "  "+authURL)
 	})
 	if err != nil {
 		return mapLoginErr(err)
 	}
 
-	fmt.Fprintln(out, "Logged in successfully.")
-	fmt.Fprintf(out, "Granted scopes: %s\n", token.Scope)
-
+	var user *domain.User
 	if deps.Profile != nil {
-		if user, err := deps.Profile.Me(ctx); err == nil {
-			printUser(out, user)
+		if u, err := deps.Profile.Me(ctx); err == nil {
+			user = &u
 		}
 		// A failure here doesn't invalidate the login itself (the token is
 		// already stored), so it's silently skipped: the user can still
-		// confirm with `auth whoami`.
+		// confirm with `auth whoami` or `auth status`.
 	}
 
+	renderAccountPanel(out, "Login realizado", token.Scope, token.ExpiresAt.Format(displayTimeLayout), user)
 	return nil
 }
 
@@ -112,11 +112,11 @@ func runAuthWhoami(ctx context.Context, deps Deps, out io.Writer) error {
 	user, err := deps.Profile.Me(ctx)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotAuthenticated) {
-			return errors.New("not logged in: run `spotify-manager auth login`")
+			return errors.New("você ainda não entrou na conta: rode `spotify-manager auth login`")
 		}
 		return err
 	}
-	printUser(out, user)
+	renderAccountPanel(out, "Conta", "", "", &user)
 	return nil
 }
 
@@ -124,7 +124,7 @@ func runAuthLogout(ctx context.Context, deps Deps, out io.Writer) error {
 	if err := deps.Auth.Logout(ctx); err != nil {
 		return err
 	}
-	fmt.Fprintln(out, "Logged out.")
+	fmt.Fprintln(out, "Você saiu da conta.")
 	return nil
 }
 
@@ -135,24 +135,82 @@ func runAuthStatus(ctx context.Context, deps Deps, out io.Writer) error {
 	}
 
 	if !status.Authenticated {
-		fmt.Fprintln(out, "Not logged in. Run `spotify-manager auth login`.")
+		renderInfoPanel(out, "Status da conta", "Você ainda não entrou na sua conta Spotify.",
+			"Use \"Entrar\" no menu Conta, ou rode: spotify-manager auth login")
 		return nil
 	}
 
-	fmt.Fprintln(out, "Logged in.")
-	fmt.Fprintf(out, "Scopes: %s\n", status.Scope)
-	fmt.Fprintf(out, "Access token expires at: %s\n", status.ExpiresAt)
+	var user *domain.User
+	if deps.Profile != nil {
+		if u, err := deps.Profile.Me(ctx); err == nil {
+			user = &u
+		}
+	}
+
+	expiresAt := status.ExpiresAt
+	if t, err := time.Parse(time.RFC3339, status.ExpiresAt); err == nil {
+		expiresAt = t.Format(displayTimeLayout)
+	}
+
+	renderAccountPanel(out, "Status da conta", status.Scope, expiresAt, user)
 	return nil
 }
 
-func printUser(out io.Writer, user domain.User) {
-	fmt.Fprintf(out, "Logged in as: %s (id: %s)\n", user.DisplayName, user.ID)
-	if user.Email != "" {
-		fmt.Fprintf(out, "Email: %s\n", user.Email)
+// displayTimeLayout is the human-friendly date/time format used across the
+// account panels (Brazilian dd/mm/yyyy, 24h clock).
+const displayTimeLayout = "02/01/2006 15:04"
+
+// renderAccountPanel draws the standardized "account info" box reused by
+// login, whoami and status — the same boxStyle/titleStyle/hintStyle as the
+// interactive menu (interactive.go), so every account-related screen reads
+// as one consistent UI. scope/expiresAt/user are each optional (pass ""
+// or nil to omit that section) so the same renderer fits whoami (identity
+// only), login (identity + fresh token info) and status (token info, with
+// identity if available).
+func renderAccountPanel(out io.Writer, title, scope, expiresAt string, user *domain.User) {
+	var b strings.Builder
+
+	if user != nil {
+		if user.DisplayName != "" {
+			b.WriteString(user.DisplayName + "\n")
+		}
+		if user.Email != "" {
+			b.WriteString(hintStyle.Render(user.Email) + "\n")
+		}
+		if user.DisplayName != "" || user.Email != "" {
+			b.WriteString("\n")
+		}
 	}
-	if user.Product != "" {
-		fmt.Fprintf(out, "Plan: %s\n", user.Product)
+
+	type row struct{ label, value string }
+	var rows []row
+	if user != nil && user.Product != "" {
+		rows = append(rows, row{"Plano", strings.ToUpper(user.Product[:1]) + user.Product[1:]})
 	}
+	if expiresAt != "" {
+		rows = append(rows, row{"Expira em", expiresAt})
+	}
+	if scope != "" {
+		rows = append(rows, row{"Permissões", fmt.Sprintf("%d concedidas", len(strings.Fields(scope)))})
+	}
+
+	labelWidth := 0
+	for _, r := range rows {
+		labelWidth = max(labelWidth, len([]rune(r.label)))
+	}
+	for _, r := range rows {
+		b.WriteString(hintStyle.Render(fmt.Sprintf("%-*s", labelWidth, r.label)) + "   " + r.value + "\n")
+	}
+
+	content := strings.TrimRight(b.String(), "\n")
+	fmt.Fprintln(out, boxStyle.Render(titleStyle.Render(title)+"\n\n"+content))
+}
+
+// renderInfoPanel draws the same standardized box for a plain message (no
+// account fields), e.g. the "not logged in" state.
+func renderInfoPanel(out io.Writer, title string, lines ...string) {
+	body := strings.Join(lines, "\n")
+	fmt.Fprintln(out, boxStyle.Render(titleStyle.Render(title)+"\n\n"+hintStyle.Render(body)))
 }
 
 // mapLoginErr turns core sentinel errors into short, user-facing messages
@@ -160,11 +218,11 @@ func printUser(out io.Writer, user domain.User) {
 func mapLoginErr(err error) error {
 	switch {
 	case errors.Is(err, domain.ErrAuthorizationDenied):
-		return errors.New("login cancelled: access was denied in the browser")
+		return errors.New("login cancelado: o acesso foi negado no navegador")
 	case errors.Is(err, domain.ErrLoginTimeout):
-		return fmt.Errorf("login timed out after %s waiting for browser authorization", loginTimeout)
+		return fmt.Errorf("login expirou após %s esperando a autorização no navegador", loginTimeout)
 	case errors.Is(err, domain.ErrStateMismatch):
-		return errors.New("login aborted: oauth state did not match (possible tampering), please try again")
+		return errors.New("login abortado: o state do oauth não bateu (possível adulteração), tente novamente")
 	default:
 		return err
 	}
